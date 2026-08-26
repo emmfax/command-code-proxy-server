@@ -58,12 +58,23 @@ func normalizeFinishReason(reason string) string {
 	}
 }
 
+func summarizeKey(key string) string {
+	if key == "" {
+		return "(none)"
+	}
+	if len(key) <= 8 {
+		return "***"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
+
 // Proxy struct
 type Proxy struct {
-	APIKey  string
-	BaseURL string
-	Client  *http.Client
-	Debug   bool
+	APIKey   string
+	AuthKeys map[string]bool
+	BaseURL  string
+	Client   *http.Client
+	Debug    bool
 }
 
 // NewProxy creates a new proxy instance
@@ -73,6 +84,62 @@ func NewProxy(apiKey string) *Proxy {
 		BaseURL: defaultBaseURL,
 		Client:  &http.Client{Timeout: defaultTimeout},
 	}
+}
+
+// SetAuthKeys configures the whitelist of client keys allowed to use this proxy.
+// An empty list disables client authentication (open proxy).
+func (p *Proxy) SetAuthKeys(keys []string) {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			m[k] = true
+		}
+	}
+	p.AuthKeys = m
+}
+
+// ParseKeyList splits a comma-separated key list.
+func ParseKeyList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func bearerKey(header string) string {
+	h := strings.TrimSpace(header)
+	h = strings.TrimPrefix(h, "Bearer ")
+	return strings.TrimSpace(h)
+}
+
+// CheckAuth validates the client key against the whitelist.
+// Returns an error message when access must be denied, "" otherwise.
+func (p *Proxy) CheckAuth(clientKey string) string {
+	if len(p.AuthKeys) == 0 {
+		return ""
+	}
+	if clientKey == "" {
+		return "API key required. Set Authorization header."
+	}
+	if !p.AuthKeys[clientKey] {
+		return "Invalid API key."
+	}
+	return ""
+}
+
+// upstreamKey decides which key authenticates against the CommandCode API:
+// the server-side -api-key when configured, otherwise the client's own key.
+func (p *Proxy) upstreamKey(clientKey string) string {
+	if p.APIKey != "" {
+		return p.APIKey
+	}
+	return clientKey
 }
 
 // BuildRequest builds the CommandCode request body
@@ -165,22 +232,24 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get API key from client Authorization header or server default
-	apiKey := r.Header.Get("Authorization")
-	if apiKey != "" {
-		apiKey = strings.TrimPrefix(apiKey, "Bearer ")
-		apiKey = strings.TrimSpace(apiKey)
-	} else if p.APIKey != "" {
-		apiKey = p.APIKey
-	} else {
+	// Client admission: validate against the whitelist when configured
+	clientKey := bearerKey(r.Header.Get("Authorization"))
+	if msg := p.CheckAuth(clientKey); msg != "" {
+		p.writeOpenAIError(w, http.StatusUnauthorized, msg, "authentication_error")
+		return
+	}
+	apiKey := p.upstreamKey(clientKey)
+	if apiKey == "" {
 		p.writeOpenAIError(w, http.StatusUnauthorized, "API key required. Set Authorization header.", "authentication_error")
 		return
 	}
 
-	// Read request
+	// Read request (with hard size cap so oversized uploads fail fast and clear)
+	const maxBodyBytes = 32 << 20 // 32 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		p.writeOpenAIError(w, http.StatusBadRequest, "Failed to read body", "invalid_request_error")
+		p.writeOpenAIError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Failed to read body (limit %d MB): %v", maxBodyBytes>>20, err), "invalid_request_error")
 		return
 	}
 
@@ -196,6 +265,8 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, http.StatusBadRequest, "messages array is required", "invalid_request_error")
 		return
 	}
+
+	log.Printf("[REQ] model=%s messages=%d bytes=%d stream=%v client=%s", MapModel(openAIReq.Model), len(openAIReq.Messages), len(body), openAIReq.Stream, summarizeKey(clientKey))
 
 	// Build CommandCode request
 	ccBody, err := p.BuildRequest(openAIReq)
@@ -230,6 +301,21 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, status, message, "api_error")
 		return
 	}
+
+	// Peek the first byte: an empty 200 body means the upstream silently gave up
+	// (typically context exceeding the model limit). Surface a clear error
+	// instead of returning a mysterious empty response to the client.
+	var firstBuf bytes.Buffer
+	if _, perr := io.CopyN(&firstBuf, ccResp.Body, 1); perr != nil || firstBuf.Len() == 0 {
+		ccResp.Body.Close()
+		log.Printf("[ERROR] Upstream returned HTTP %d with EMPTY body (%d messages, %d bytes sent) — likely context too large; client should compact history", ccResp.StatusCode, len(openAIReq.Messages), len(body))
+		p.writeOpenAIError(w, http.StatusBadGateway, "Upstream returned an empty response. The conversation context most likely exceeds the model limit — compact or reduce the message history and retry.", "api_error")
+		return
+	}
+	ccResp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(&firstBuf, ccResp.Body), ccResp.Body}
 
 	requestID := "chatcmpl-" + uuid.New().String()[:29]
 	created := time.Now().Unix()
@@ -668,6 +754,10 @@ func responseItemsToMessages(items []any) []api.OpenAIMessage {
 
 // HandleModels handles the /v1/models endpoint
 func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
+	if msg := p.CheckAuth(bearerKey(r.Header.Get("Authorization"))); msg != "" {
+		p.writeOpenAIError(w, http.StatusUnauthorized, msg, "authentication_error")
+		return
+	}
 	models := api.OpenAIModelList{
 		Object: "list",
 		Data: []api.OpenAIModel{

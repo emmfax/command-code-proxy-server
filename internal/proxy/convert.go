@@ -68,13 +68,23 @@ func ConvertMessages(openAIMsgs []api.OpenAIMessage) []api.CCMessage {
 				})
 				addedTools[tc.ID] = true
 			}
-			ccMsgs = append(ccMsgs, api.CCMessage{Role: m.Role, Content: contentParts})
+			ccMsgs = append(ccMsgs, api.CCMessage{Role: m.Role, Content: ensureContentParts(contentParts)})
 			continue
 		}
 
-		ccMsgs = append(ccMsgs, api.CCMessage{Role: m.Role, Content: parseContent(m.Content, toolNames)})
+		ccMsgs = append(ccMsgs, api.CCMessage{Role: m.Role, Content: ensureContentParts(parseContent(m.Content, toolNames))})
 	}
 	return ccMsgs
+}
+
+// ensureContentParts guarantees a message never serializes as "content": null.
+// Upstream rejects null content, so empty messages become a single text part.
+func ensureContentParts(parts []api.CCContentPart) []api.CCContentPart {
+	if len(parts) > 0 {
+		return parts
+	}
+	s := " "
+	return []api.CCContentPart{{Type: "text", Text: &s}}
 }
 
 func ConvertTools(openAITools []any) []any {

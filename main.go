@@ -3,13 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/dev2k6/command-code-proxy-server/internal/proxy"
 	"github.com/dev2k6/command-code-proxy-server/internal/server"
 	"github.com/dev2k6/command-code-proxy-server/internal/update"
 )
 
-const appVersion = "v1.0.8"
+const appVersion = "v1.0.9"
 const repositoryURL = "https://github.com/dev2k6/command-code-proxy-server"
 const debugLogging = false
 
@@ -17,6 +18,7 @@ func main() {
 	port := flag.String("port", "", "Port to run the server on (default: 55990)")
 	host := flag.String("host", "", "Host to bind to (default: 127.0.0.1)")
 	apiKey := flag.String("api-key", "", "API key for CommandCode (optional, can also be set via Authorization header)")
+	authKeys := flag.String("auth-keys", "", "Comma-separated client keys allowed to use this proxy (empty = open). Also: env CCP_AUTH_KEYS")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -25,14 +27,20 @@ func main() {
 		return
 	}
 
-	proxy := proxy.NewProxy(*apiKey)
-	proxy.Debug = debugLogging
+	keys := *authKeys
+	if keys == "" {
+		keys = os.Getenv("CCP_AUTH_KEYS")
+	}
 
-	srv := server.NewServer(proxy)
+	p := proxy.NewProxy(*apiKey)
+	p.Debug = debugLogging
+	p.SetAuthKeys(proxy.ParseKeyList(keys))
+
+	srv := server.NewServer(p)
 	srv.SetPort(*port)
 	srv.SetHost(*host)
 
-	printStartupInfo(srv)
+	printStartupInfo(srv, len(p.AuthKeys) > 0)
 
 	srv.Start()
 }
@@ -45,7 +53,7 @@ func versionText() string {
 	return fmt.Sprintf("%s (latest: %s)", appVersion, latest)
 }
 
-func printStartupInfo(srv *server.Server) {
+func printStartupInfo(srv *server.Server, authEnabled bool) {
 	fmt.Println("")
 	fmt.Println("========================================")
 	fmt.Println("  CommandCode Proxy Server")
@@ -55,6 +63,11 @@ func printStartupInfo(srv *server.Server) {
 	fmt.Printf("  Repository:  %s\n", repositoryURL)
 	fmt.Printf("  Host:        %s\n", srv.GetHost())
 	fmt.Printf("  Port:        %s\n", srv.GetPort())
+	if authEnabled {
+		fmt.Println("  Client auth: ENABLED (whitelist via -auth-keys / CCP_AUTH_KEYS)")
+	} else {
+		fmt.Println("  Client auth: disabled (open proxy)")
+	}
 	fmt.Println("  Base URL:    https://api.commandcode.ai")
 	fmt.Println("")
 	fmt.Println("  Endpoints:")

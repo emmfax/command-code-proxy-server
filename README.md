@@ -4,7 +4,7 @@ OpenAI-compatible proxy server for the CommandCode API. It exposes `/v1/chat/com
 
 Repository: https://github.com/dev2k6/command-code-proxy-server
 
-Version: `v1.0.8`
+Version: `v1.0.9`
 
 ## Features
 
@@ -14,6 +14,10 @@ Version: `v1.0.8`
 - Short model name mapping
 - Optional default API key from CLI
 - Per-request API key via `Authorization` header
+- **Client key whitelist** (`-auth-keys` / env `CCP_AUTH_KEYS`) — restrict who may use this proxy; upstream CommandCode key stays server-side
+- Empty/null message content is normalized (never serialized as `"content": null`)
+- Oversized request bodies rejected with a clear 413 error
+- Upstream empty responses surfaced as a clear 502 error with guidance instead of a mysterious empty reply
 - Configurable host and port
 - Checks GitHub tags for a newer proxy version and displays it next to the current version
 
@@ -43,7 +47,8 @@ go run main.go [options]
 | --- | --- | --- |
 | `-host` | `127.0.0.1` | Host to bind the server to |
 | `-port` | `55990` | Port to run the server on |
-| `-api-key` | empty | Optional default CommandCode API key |
+| `-api-key` | empty | CommandCode API key used for upstream calls (kept server-side) |
+| `-auth-keys` | empty | Comma-separated client keys allowed to use this proxy; empty = open proxy. Env: `CCP_AUTH_KEYS` |
 | `-version` | `false` | Print version and exit |
 
 Examples:
@@ -58,8 +63,14 @@ go run main.go -port 8080
 # Expose on all interfaces
 go run main.go -host 0.0.0.0
 
-# Use a default API key for all requests that do not include Authorization
+# Use a default API key for all upstream calls that do not include Authorization
 go run main.go -api-key your-commandcode-api-key
+
+# Require clients to present one of these keys (upstream key stays secret on the server)
+go run main.go -auth-keys "client-key-1,client-key-2" -api-key your-commandcode-api-key
+
+# Same via environment variable
+CCP_AUTH_KEYS="client-key-1,client-key-2" go run main.go
 
 # Print version
 go run main.go -version
@@ -82,17 +93,42 @@ GOOS=linux GOARCH=amd64 go build -o bin/command-code-proxy
 
 ## API key behavior
 
-The proxy uses the API key in this order:
+Two separate keys are involved:
 
-1. `Authorization` header from the incoming client request
-2. `-api-key` CLI value
-3. If neither exists, the request returns `401 Unauthorized`
+1. **Client key** — the `Authorization` header sent by whoever calls this proxy.
+   When `-auth-keys` (or env `CCP_AUTH_KEYS`) is configured, this key must be in
+   the whitelist, otherwise the request is rejected with `401`.
+   When no whitelist is configured, any client key is accepted (open proxy).
+2. **Upstream key** — the key used against `api.commandcode.ai`. Resolution order:
+   1. `-api-key` CLI value (recommended: keep it server-side and secret)
+   2. The client's `Authorization` key (pass-through)
 
 Header format:
 
 ```http
-Authorization: Bearer your-commandcode-api-key
+Authorization: Bearer your-key
 ```
+
+If neither a whitelist nor any key is available, the request returns `401 Unauthorized`.
+
+## Content normalization
+
+OpenAI clients sometimes send messages with `"content": null` or `"content": ""`
+(e.g. assistant turns that only contain tool calls). The CommandCode upstream
+rejects null content, so this proxy guarantees every outgoing message carries
+valid content parts — empty ones become a single text part.
+
+## Request size limit
+
+Request bodies are capped at 32 MB. Larger uploads are rejected with a clear
+`413` error instead of hanging or being silently dropped by intermediate layers.
+
+## Empty upstream responses
+
+When the CommandCode API answers `200` with an empty body (observed when the
+conversation context exceeds the model limit), the proxy converts it into a
+`502` with an explanatory message so clients can react (e.g. compact history)
+instead of hanging on a dead stream.
 
 ## Endpoints
 
