@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -127,10 +128,26 @@ func (p *Proxy) CheckAuth(clientKey string) string {
 	if clientKey == "" {
 		return "API key required. Set Authorization header."
 	}
-	if !p.AuthKeys[clientKey] {
+	ok := constantTimeKeyMatch(clientKey, p.AuthKeys)
+	if !ok {
 		return "Invalid API key."
 	}
 	return ""
+}
+
+// constantTimeKeyMatch compares the candidate against every whitelisted key
+// using a constant-time comparison to avoid timing side channels.
+func constantTimeKeyMatch(candidate string, allowed map[string]bool) bool {
+	matched := false
+	candidateBytes := []byte(candidate)
+	for k := range allowed {
+		a := []byte(k)
+		equal := len(a) == len(candidateBytes) && subtle.ConstantTimeCompare(a, candidateBytes) == 1
+		if equal {
+			matched = true
+		}
+	}
+	return matched
 }
 
 // upstreamKey decides which key authenticates against the CommandCode API:

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dev2k6/command-code-proxy-server/internal/proxy"
 	"github.com/dev2k6/command-code-proxy-server/internal/server"
@@ -19,6 +20,7 @@ func main() {
 	host := flag.String("host", "", "Host to bind to (default: 127.0.0.1)")
 	apiKey := flag.String("api-key", "", "API key for CommandCode (optional, can also be set via Authorization header)")
 	authKeys := flag.String("auth-keys", "", "Comma-separated client keys allowed to use this proxy (empty = open). Also: env CCP_AUTH_KEYS")
+	baseURL := flag.String("base-url", "", "Override upstream base URL (default: https://api.commandcode.ai)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -35,12 +37,19 @@ func main() {
 	p := proxy.NewProxy(*apiKey)
 	p.Debug = debugLogging
 	p.SetAuthKeys(proxy.ParseKeyList(keys))
+	if *baseURL != "" {
+		p.BaseURL = strings.TrimRight(*baseURL, "/")
+	}
 
 	srv := server.NewServer(p)
 	srv.SetPort(*port)
 	srv.SetHost(*host)
 
-	printStartupInfo(srv, len(p.AuthKeys) > 0)
+	effectiveBase := p.BaseURL
+	if effectiveBase == "" {
+		effectiveBase = "https://api.commandcode.ai"
+	}
+	printStartupInfo(srv, len(p.AuthKeys) > 0, effectiveBase)
 
 	srv.Start()
 }
@@ -53,7 +62,7 @@ func versionText() string {
 	return fmt.Sprintf("%s (latest: %s)", appVersion, latest)
 }
 
-func printStartupInfo(srv *server.Server, authEnabled bool) {
+func printStartupInfo(srv *server.Server, authEnabled bool, baseURL string) {
 	fmt.Println("")
 	fmt.Println("========================================")
 	fmt.Println("  CommandCode Proxy Server")
@@ -68,7 +77,7 @@ func printStartupInfo(srv *server.Server, authEnabled bool) {
 	} else {
 		fmt.Println("  Client auth: disabled (open proxy)")
 	}
-	fmt.Println("  Base URL:    https://api.commandcode.ai")
+	fmt.Printf("  Base URL:    %s\n", baseURL)
 	fmt.Println("")
 	fmt.Println("  Endpoints:")
 	fmt.Println("    POST /v1/chat/completions  (OpenAI-compatible)")

@@ -51,6 +51,7 @@ go run main.go [options]
 | `-port` | `55990` | 服务监听端口 |
 | `-api-key` | 空 | 用于上游调用的 CommandCode 密钥（建议仅保存在服务端） |
 | `-auth-keys` | 空 | 允许使用本代理的客户端密钥白名单，逗号分隔；留空 = 开放代理。环境变量：`CCP_AUTH_KEYS` |
+| `-base-url` | `https://api.commandcode.ai` | 覆盖上游基础地址（用于测试或自建） |
 | `-version` | `false` | 打印版本后退出 |
 
 示例：
@@ -129,6 +130,55 @@ OpenAI 客户端有时会发送 `"content": null` 或 `"content": ""` 的消息
 当 CommandCode API 返回 `200` 但响应体为空时（实测发生在对话上下文超出模型上限的场景），
 代理会将其转换为带有说明信息的 `502` 错误，让客户端可以做出反应
 （例如压缩历史记录），而不是挂在一条死掉的流上。
+
+## 安全警告
+
+`-host 0.0.0.0` 且未配置 `-auth-keys` 时，本代理是**开放中转**：任何扫到地址的人都能烧光你的 CommandCode 配额。公网部署务必配合 `-auth-keys`（或保持 `-host 127.0.0.1` 挂在自己的鉴权层后面）。
+
+## 部署
+
+### 快速启动（二进制）
+
+```bash
+# 下载 release 二进制或自行构建（见构建章节）
+chmod +x command-code-proxy
+./command-code-proxy -port 55990 -auth-keys "client-key-1" -api-key "cc-secret-key"
+```
+
+### systemd（Linux）
+
+```ini
+# /etc/systemd/system/ccproxy.service
+[Unit]
+Description=CommandCode Proxy Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/ccproxy/command-code-proxy -port 55990 -host 0.0.0.0 -auth-keys change-me-client-key -api-key cc-secret-key
+Environment=CCP_AUTH_KEYS=change-me-client-key
+Restart=always
+RestartSec=3
+User=nobody
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ccproxy
+journalctl -u ccproxy -f        # 跟踪日志（[REQ] 行包含模型/消息数/字节数）
+```
+
+### 国内构建加速
+
+```bash
+GOPROXY=https://goproxy.cn,direct go build -o command-code-proxy .
+```
 
 ## 端点
 
@@ -226,22 +276,23 @@ curl -N http://127.0.0.1:55990/v1/chat/completions \
 ├── go.sum
 ├── main.go
 ├── bin
-│   ├── command-code-proxy
-│   └── command-code-proxy.exe
+│   └── （预编译产物，如 command-code-proxy、.exe）
 └── internal
     ├── api
     │   ├── commandcode.go
     │   └── openai.go
     ├── proxy
-    │   ├── convert.go
-    │   ├── model.go
-    │   └── proxy.go
+    │   ├── convert.go        # OpenAI -> CommandCode 消息转换（含内容规范化）
+    │   ├── convert_test.go   # 回归测试："content" 绝不允许序列化为 null
+    │   ├── model.go          # 模型别名映射
+    │   ├── model_test.go
+    │   └── proxy.go          # 鉴权、请求处理、SSE 流式转发
     ├── server
-    │   └── server.go
+    │   └── server.go         # HTTP 服务、路由、体积上限、超时
     ├── update
     │   └── update.go
     └── version
-        └── version.go
+        └── version.go        # npm 版本号请求头缓存
 ```
 
 ## 工作原理

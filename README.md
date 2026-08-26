@@ -51,6 +51,7 @@ go run main.go [options]
 | `-port` | `55990` | Port to run the server on |
 | `-api-key` | empty | CommandCode API key used for upstream calls (kept server-side) |
 | `-auth-keys` | empty | Comma-separated client keys allowed to use this proxy; empty = open proxy. Env: `CCP_AUTH_KEYS` |
+| `-base-url` | `https://api.commandcode.ai` | Override upstream base URL (for testing or self-hosting) |
 | `-version` | `false` | Print version and exit |
 
 Examples:
@@ -131,6 +132,55 @@ When the CommandCode API answers `200` with an empty body (observed when the
 conversation context exceeds the model limit), the proxy converts it into a
 `502` with an explanatory message so clients can react (e.g. compact history)
 instead of hanging on a dead stream.
+
+## Security notice
+
+Binding to `0.0.0.0` without `-auth-keys` turns this proxy into an **open relay**: anyone who finds your address can burn your CommandCode quota. Always pair public deployments with `-auth-keys` (or keep `-host 127.0.0.1` behind your own auth layer).
+
+## Deployment
+
+### Quick start (binary)
+
+```bash
+# download a release binary or build your own (see Build)
+chmod +x command-code-proxy
+./command-code-proxy -port 55990 -auth-keys "client-key-1" -api-key "cc-secret-key"
+```
+
+### systemd (Linux)
+
+```ini
+# /etc/systemd/system/ccproxy.service
+[Unit]
+Description=CommandCode Proxy Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/ccproxy/command-code-proxy -port 55990 -host 0.0.0.0 -auth-keys change-me-client-key -api-key cc-secret-key
+Environment=CCP_AUTH_KEYS=change-me-client-key
+Restart=always
+RestartSec=3
+User=nobody
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ccproxy
+journalctl -u ccproxy -f        # tail logs ([REQ] lines show model/messages/bytes)
+```
+
+### Building in mainland China
+
+```bash
+GOPROXY=https://goproxy.cn,direct go build -o command-code-proxy .
+```
 
 ## Endpoints
 
@@ -223,26 +273,28 @@ Unknown model names are passed through unchanged.
 ```text
 .
 ├── README.md
+├── README.zh-CN.md
 ├── go.mod
 ├── go.sum
 ├── main.go
 ├── bin
-│   ├── command-code-proxy
-│   └── command-code-proxy.exe
+│   └── (prebuilt binaries, e.g. command-code-proxy, .exe)
 └── internal
     ├── api
     │   ├── commandcode.go
     │   └── openai.go
     ├── proxy
-    │   ├── convert.go
-    │   ├── model.go
-    │   └── proxy.go
+    │   ├── convert.go        # OpenAI -> CommandCode message conversion (+ content normalization)
+    │   ├── convert_test.go   # regression test: "content" must never serialize as null
+    │   ├── model.go          # model alias mapping
+    │   ├── model_test.go
+    │   └── proxy.go          # auth, request handling, SSE streaming
     ├── server
-    │   └── server.go
+    │   └── server.go         # HTTP server, routing, body limit, timeouts
     ├── update
     │   └── update.go
     └── version
-        └── version.go
+        └── version.go        # npm version header cache
 ```
 
 ## How it works

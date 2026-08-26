@@ -56,7 +56,10 @@ func GetCommandCodeVersion() string {
 
 // fetchVersionFromNPM fetches the latest version from npm registry
 func fetchVersionFromNPM() (*VersionInfo, error) {
-	resp, err := http.Get("https://registry.npmjs.org/command-code/latest")
+	// Dedicated client with a hard timeout: a blocked/slow registry must never
+	// stall upstream requests that need this version header.
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://registry.npmjs.org/command-code/latest")
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch version: %w", err)
 	}
