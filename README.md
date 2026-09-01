@@ -1,4 +1,6 @@
-# CommandCode Proxy Server
+# CommandCode Proxy Server Fix
+
+Fixed issues where the original version could not directly use keys and the original version's empty response volume was too large, causing errors when calling tools
 
 English | [简体中文](README.zh-CN.md)
 
